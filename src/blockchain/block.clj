@@ -1,7 +1,7 @@
 (ns blockchain.block
-  (:require [clojure.spec.alpha :as    s]
-            [clojure.string     :as    str]
-            [digest             :refer (sha-256)]))
+  (:require [blockchain.util.encoding :refer (sha-256)]
+            [clojure.spec.alpha       :as    s]
+            [clojure.string           :as    str]))
 
 (s/def ::hash string?)
 (s/def ::previous-hash ::hash)
