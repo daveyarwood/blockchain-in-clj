@@ -1,18 +1,23 @@
 (ns blockchain.block
-  (:require [blockchain.util.encoding :refer (sha-256)]
+  (:require [blockchain.transaction   :as    tx]
+            [blockchain.util.encoding :refer (sha-256 merkle-root)]
             [clojure.spec.alpha       :as    s]
             [clojure.string           :as    str]))
 
 (s/def ::hash string?)
 (s/def ::previous-hash ::hash)
-(s/def ::data string?)
+(s/def ::transactions (s/and (s/coll-of ::tx/transaction) sequential?))
 (s/def ::timestamp pos-int?)
 (s/def ::nonce int?)
 (s/def ::proof (s/keys :req [::hash ::nonce]))
 
 (defn calculate-hash
-  [{::keys [previous-hash timestamp data nonce] :as block}]
-  (sha-256 (str previous-hash timestamp nonce data)))
+  [{::keys [previous-hash timestamp transactions nonce] :as block}]
+  (->> transactions
+       (map ::tx/hash)
+       merkle-root
+       (str previous-hash timestamp nonce)
+       sha-256))
 
 (defn correct-hash?
   [{::keys [hash] :as block}]
@@ -20,22 +25,26 @@
 
 (s/def ::block
   (s/and
-    (s/keys :req [::hash ::previous-hash ::data ::timestamp]
+    (s/keys :req [::hash ::previous-hash ::transactions ::timestamp]
             :opt [::proof])
     correct-hash?
     #(or (not (::proof %))
          (correct-hash? (merge (::proof %) %)))))
 
 (defn block
-  "Returns an unmined block (nonce = 0) with the provided data and previous
-   hash."
-  [data previous-hash]
+  "Returns an unmined block (nonce = 0) with the provided transactions and
+   previous hash."
+  [transactions previous-hash]
   (let [timestamp (System/currentTimeMillis)
         block'    {::previous-hash previous-hash
-                   ::data          data
+                   ::transactions  transactions
                    ::timestamp     timestamp
                    ::nonce         0}]
     (assoc block' ::hash (calculate-hash block'))))
+
+(defn genesis-block
+  []
+  (block [] "0"))
 
 (s/def ::blockchain
   (s/and (s/coll-of ::block)

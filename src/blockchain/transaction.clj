@@ -1,9 +1,8 @@
 (ns blockchain.transaction
-  (:require [blockchain.util.encoding :refer (base-64)]
+  (:require [blockchain.util.encoding :refer (base-64 sha-256)]
             [clj-pgp.generate         :as    pgp-gen]
             [clj-pgp.signature        :as    pgp-sig]
-            [clojure.spec.alpha       :as    s]
-            [digest                   :refer (sha-256)])
+            [clojure.spec.alpha       :as    s])
   (:import [org.bouncycastle.openpgp
             PGPKeyPair PGPPublicKey PGPPrivateKey PGPSignature]))
 
@@ -14,7 +13,10 @@
   (-> (pgp-gen/ec-keypair-generator "secp160r2")
       (pgp-gen/generate-keypair :ecdsa)))
 
-(s/def ::hash string?) ; used as a unique identifier
+;; used as a unique identifier as well as for verification
+(s/def ::hash string?)
+(s/def ::id ::hash)
+(s/def ::transaction-id ::id)
 
 (s/def ::timestamp pos-int?) ; helps to ensure a unique hash
 
@@ -22,44 +24,68 @@
 (s/def ::sender ::public-key)
 (s/def ::recipient ::public-key)
 
-(s/def ::value float?)
+(s/def ::value (s/and number? pos?))
 
-(s/def ::input nil?) ; TODO
-(s/def ::output nil?) ; TODO
-(s/def ::inputs (s/and (s/coll-of ::input) sequential?))
-(s/def ::outputs (s/and (s/coll-of ::output) sequential?))
+(defn calculate-output-hash
+  [{::keys [recipient value transaction-id]}]
+  (sha-256 (str (-> recipient .getEncoded base-64) value transaction-id)))
 
-(defn calculate-hash
+(defn correct-output-hash?
+  [{::keys [hash] :as output}]
+  (= hash (calculate-output-hash output)))
+
+(s/def ::output
+  (s/and
+    (s/keys :req [::hash ::transaction-id ::recipient ::value])
+    correct-output-hash?))
+
+(defn output
+  [transaction-id recipient value]
+  (let [output' {::transaction-id transaction-id
+                 ::recipient      recipient
+                 ::value          value}]
+    (assoc output' ::hash (calculate-output-hash output'))))
+
+(s/def ::inputs (s/and (s/coll-of ::transaction-id) sequential?))
+
+(defn calculate-transaction-hash
   [{::keys [sender recipient value timestamp] :as tx}]
   (sha-256 (str (-> sender .getEncoded base-64)
                 (-> recipient .getEncoded base-64)
                 value
                 timestamp)))
 
-(defn correct-hash?
+(defn correct-transaction-hash?
   [{::keys [hash] :as tx}]
-  (= hash (calculate-hash tx)))
+  (= hash (calculate-transaction-hash tx)))
+
+(s/def ::signature #(instance? PGPSignature %))
+
+(defn signature-verified?
+  "Returns truthy if transaction is signed and the signature is verified with
+   the public key."
+  [{::keys [hash ^PGPPublicKey sender ^PGPSignature signature] :as transaction}]
+  (pgp-sig/verify hash signature sender))
 
 (s/def ::transaction
   (s/and
-    (s/keys :req [::hash ::timestamp ::sender ::recipient ::inputs ::outputs])
-    correct-hash?))
-
-(defn transaction
-  [sender recipient value inputs]
-  (let [timestamp (System/currentTimeMillis)
-        tx       {::sender sender
-                  ::recipient recipient
-                  ::timestamp timestamp
-                  ::inputs    inputs
-                  ;; TODO
-                  ::outputs   [nil]}]
-    (assoc tx ::hash (calculate-hash tx))))
+    (s/keys :req [::hash ::timestamp ::sender ::recipient ::inputs ::signature])
+    correct-transaction-hash?
+    signature-verified?))
 
 (defn sign ^PGPSignature
   [transaction ^PGPPrivateKey private-key]
-  (-> transaction calculate-hash (pgp-sig/sign private-key)))
+  (-> transaction calculate-transaction-hash (pgp-sig/sign private-key)))
 
-(defn verify-signature
-  [transaction ^PGPSignature signature ^PGPPublicKey public-key]
-  (-> transaction calculate-hash (pgp-sig/verify signature public-key)))
+(defn transaction
+  [^PGPKeyPair sender ^PGPPublicKey recipient value inputs]
+  (let [timestamp (System/currentTimeMillis)
+        tx        {::sender    (.getPublicKey sender)
+                   ::recipient recipient
+                   ::timestamp timestamp
+                   ::value     value
+                   ::inputs    inputs}]
+    (assoc tx
+           ::hash      (calculate-transaction-hash tx)
+           ::signature (sign tx (.getPrivateKey sender)))))
+
